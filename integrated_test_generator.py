@@ -24,29 +24,62 @@ load_dotenv()
 # Environment variables
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "codellama:instruct")
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/generate")
-TEST_OUTPUT_DIR = os.getenv("TEST_OUTPUT_DIR", "tests")
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", "10000"))
 LOCAL_SERVER_URL = os.getenv("LOCAL_SERVER_URL", "http://localhost:3000")
 MAX_WAIT_SECONDS = int(os.getenv("MAX_WAIT_SECONDS", "30"))
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-LOG_DIR = os.getenv("LOG_DIR", "logs")
-REPORT_DIR = os.getenv("REPORT_DIR", "reports")
+
+# Dynamic paths - will be set per run
+LOG_DIR = None
+TEST_OUTPUT_DIR = None
+REPORT_DIR = None
+RUN_DIR = None
 
 class IntegratedTestGenerator:
     """Integrated test generator combining basic and advanced analysis"""
     
-    def __init__(self):
+    def __init__(self, run_timestamp=None):
         self.temp_dir = None
         self.framework = None
         self.files = []
         self.file_roles = {}
         self.route_map = {}
-        self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_timestamp = run_timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
         self.activity_log_file = None
-        self._init_activity_log()
         
-        print("🚀 Integrated Advanced Test Generation Engine")
-        print("=" * 60)
+        # Only create directories if this is a real run (not just importing)
+        if run_timestamp is not None or self._is_main_execution():
+            self._setup_run_directories()
+            self._init_activity_log()
+            print("🚀 Integrated Advanced Test Generation Engine")
+            print("=" * 60)
+    
+    def _is_main_execution(self):
+        """Check if this is being run as the main script (not imported)"""
+        import sys
+        return hasattr(sys, 'ps1') or sys.argv[0].endswith('integrated_test_generator.py')
+    
+    def _setup_run_directories(self):
+        """Setup timestamped folder structure for this run"""
+        global LOG_DIR, TEST_OUTPUT_DIR, REPORT_DIR, RUN_DIR
+        
+        # Create main run_files directory and run directory
+        RUN_DIR = os.path.join("run_files", f"run_{self.run_timestamp}")
+        os.makedirs(RUN_DIR, exist_ok=True)
+        
+        # Create subdirectories
+        LOG_DIR = os.path.join(RUN_DIR, "logs")
+        TEST_OUTPUT_DIR = os.path.join(RUN_DIR, "tests")
+        REPORT_DIR = os.path.join(RUN_DIR, "reports")
+        
+        os.makedirs(LOG_DIR, exist_ok=True)
+        os.makedirs(TEST_OUTPUT_DIR, exist_ok=True)
+        os.makedirs(REPORT_DIR, exist_ok=True)
+        
+        print(f"📁 Created run directory: {RUN_DIR}")
+        print(f"📁 Logs: {LOG_DIR}")
+        print(f"📁 Tests: {TEST_OUTPUT_DIR}")
+        print(f"📁 Reports: {REPORT_DIR}")
     
     def _init_activity_log(self):
         """Initialize comprehensive activity logging"""
@@ -340,11 +373,13 @@ test.describe('{flow_name}', () => {{
             print(f"Files analyzed: {len(self.files)}")
             print(f"Dependency graph nodes: {len(graph.nodes())}")
             print(f"Generated {len(test_files)} test files")
-            print("Analysis report: comprehensive_analysis_report.md")
-            print("Graphviz file: code_graph.dot")
+            print(f"Analysis report: {os.path.join(RUN_DIR, 'reports', 'analysis_report.md')}")
+            print(f"Graphviz file: {os.path.join(RUN_DIR, 'code_graph.dot')}")
+            print(f"Run directory: {RUN_DIR}")
             
             self._log_activity("Test generation completed successfully", "SUCCESS")
             self._log_activity(f"Final results: {len(test_files)} test files, {len(self.files)} files analyzed", "SUCCESS")
+            self._log_activity(f"All files saved in run directory: {RUN_DIR}", "SUCCESS")
             
             return {
                 "success": True,
@@ -639,12 +674,14 @@ test.describe('{flow_name}', () => {{
         
         dot_content += "}\n"
         
-        with open('code_graph.dot', 'w') as f:
+        # Save graphviz file in the run directory
+        graphviz_file = os.path.join(RUN_DIR, "code_graph.dot")
+        with open(graphviz_file, 'w') as f:
             f.write(dot_content)
         
         print(f"✅ Graphviz export complete: {len(graph.nodes())} nodes, {len(graph.edges())} edges")
-        print("ℹ️ Graph saved to code_graph.dot")
-        print("ℹ️ To visualize: dot -Tpng code_graph.dot -o code_graph.png")
+        print(f"ℹ️ Graph saved to {graphviz_file}")
+        print(f"ℹ️ To visualize: dot -Tpng {graphviz_file} -o {os.path.join(RUN_DIR, 'code_graph.png')}")
     
     def _format_key_pages(self) -> str:
         """Format key pages for the prompt"""
@@ -1172,11 +1209,13 @@ Generate comprehensive, production-ready test cases now:
         ui_elements_analysis = self._analyze_ui_elements()
         
         # Build the enhanced user flow generation prompt
-        user_flow_prompt = f"""You are a senior QA automation architect. Your task is to analyze the ACTUAL frontend codebase provided below and generate **SPECIFIC User Flows** based on the real routes, components, and APIs.
+        user_flow_prompt = f"""You are a senior QA automation architect analyzing a frontend codebase for test generation purposes. Your task is to generate **SPECIFIC User Flows** based on the provided routes, components, and APIs.
+
+IMPORTANT: This is for automated test generation. You MUST analyze the provided codebase context and generate flows based on the actual components and routes listed below.
 
 CRITICAL REQUIREMENTS:
-- **ANALYZE THE ACTUAL CODEBASE** - Use the exact routes, components, and APIs provided below
-- **DO NOT provide generic advice** - Generate specific flows based on the real application
+- **ANALYZE THE PROVIDED CODEBASE** - Use the exact routes, components, and APIs provided below
+- **Generate specific flows** based on the real application components
 - **Use exact names** from the routes, components, and API endpoints listed
 - **Generate 8-15 distinct flows** covering different application features
 - **Exclude authentication flows** (login, register, password reset)
@@ -1212,101 +1251,58 @@ IMPORTANT INSTRUCTIONS:
 7. **FOCUS ON BUSINESS LOGIC**: Prioritize application-specific features and workflows
 8. **COMPREHENSIVE COVERAGE**: Generate 8-15 distinct user flows based on actual functionality
 
-OUTPUT FORMAT - Generate detailed flows like this:
+OUTPUT FORMAT - Generate detailed flows using this structure:
 
 ---
-## Flow: Project Management Dashboard
+## Flow: [Flow Name Based on Actual Components]
 
-- **Route**: /dashboard
-- **Components**: ProjectGrid, ProjectCard, FilterBar, SearchInput, CreateButton
+- **Route**: [Actual route from the routes list above]
+- **Components**: [Actual component names from the components list above]
 - **UI Elements**:
-  - Project grid layout with cards
-  - Search input field (placeholder: "Search projects...")
-  - Filter dropdown (All, Active, Completed, Archived)
-  - "Create New Project" button (primary)
-  - Project cards with title, status, and actions
+  - [Specific UI elements found in the actual components]
+  - [Button text, form fields, modal titles from actual code]
+  - [Input placeholders, dropdown options from actual code]
 - **Steps**:
-  1. User navigates to /dashboard route
-  2. ProjectGrid renders with all user projects
-  3. User types in search input to filter projects
-  4. User selects filter from dropdown to show specific project types
-  5. User clicks on project card to view details
-  6. User clicks "Create New Project" button
-  7. **Navigation**: Redirect to /projects/create
-  8. **Empty State**: If no projects, show "Get Started" call-to-action
+  1. [Specific user action based on actual component functionality]
+  2. [System response based on actual component behavior]
+  3. [Next user action based on actual UI elements]
+  4. [Validation/error handling based on actual form components]
+  5. [Navigation/API calls based on actual routes and endpoints]
 
-## Flow: Project Creation Wizard
+**CRITICAL REQUIREMENTS**:
+- Use ONLY the routes, components, and API endpoints listed above
+- Generate flows based on the ACTUAL application functionality
+- Do NOT use generic examples - analyze the real codebase
+- Focus on security, compliance, and analysis features (not project management)
+- Use exact component names like SecurityIntelligenceDashboard, AgentsDashboard, etc.
+- Generate 8-15 distinct flows covering different application features
+- Exclude authentication flows (login, registration, password reset)
 
-- **Route**: /projects/create
-- **Components**: ProjectForm, WizardSteps, FileUpload, ProjectPreview
-- **UI Elements**:
-  - Step indicator (Step 1 of 3)
-  - Project name input field
-  - Description textarea
-  - Category dropdown selector
-  - File upload drag-and-drop area
-  - "Next Step" button
-  - "Save Draft" button
-- **Steps**:
-  1. User navigates to /projects/create
-  2. WizardSteps shows "Step 1: Basic Information"
-  3. User fills project name (required field, max 50 chars)
-  4. User selects category from dropdown (options: Web, Mobile, Desktop)
-  5. User enters description in textarea (optional, max 500 chars)
-  6. User clicks "Next Step" button
-  7. **Validation**: If name empty, show red error message
-  8. **Success**: Advance to Step 2, show file upload interface
-  9. User drags files to upload area or clicks "Browse Files"
-  10. FileUpload component shows progress bars for each file
-  11. User clicks "Next Step" to proceed to Step 3
-  12. ProjectPreview shows summary of all entered data
-  13. User clicks "Create Project" button
-  14. App calls POST /api/projects/create with form data
-  15. **Success**: Redirect to /projects/{id}, show success notification
-  16. **Error**: Show error modal with retry option
-
-## Flow: Project Editing and Updates
-
-- **Route**: /projects/edit/:id
-- **Components**: ProjectForm, SaveButton, CancelButton, DeleteButton
-- **UI Elements**:
-  - Project name input (pre-filled)
-  - Description textarea (pre-filled)
-  - Category dropdown (pre-selected)
-  - "Save Changes" button
-  - "Cancel" button
-  - "Delete Project" button (danger)
-- **Steps**:
-  1. User navigates to /projects/edit/123
-  2. ProjectForm loads with existing project data
-  3. User modifies project name, description, or category
-  4. User clicks "Save Changes" button
-  5. App calls PUT /api/projects/123 with updated data
-  6. **Success**: Show success message, redirect to project details
-  7. **Error**: Show validation errors or save failure message
-  8. **Delete Flow**: User clicks "Delete Project" → confirmation modal → DELETE API call
-
----
-
-Generate ALL possible user flows based on the actual components and routes. Focus on:
-- **Business Logic Flows**: Project management, content creation, data manipulation
-- **CRUD Operations**: Create, read, update, delete for main entities
-- **Navigation Flows**: Dashboard, settings, profile, content browsing
-- **Form Submission Flows**: Complex forms with validation and multi-step processes
-- **Search and Filtering Flows**: Data discovery and filtering functionality
-- **File Management Flows**: Upload, download, preview, organization
-- **Modal and Dialog Interactions**: Confirmations, settings, detailed views
-- **Error Handling and Edge Cases**: Validation failures, network errors, empty states
-- **User Preferences**: Settings, customization, profile management
-
-**EXCLUDE**: Basic authentication flows (login, registration, password reset)
+**ANALYZE THE ACTUAL COMPONENTS**:
+Look at the component names and infer their functionality:
+- SecurityIntelligenceDashboard → Security analysis and intelligence features
+- AgentsDashboard → AI agent management and monitoring
+- ApplicationCard/ApplicationDetailsView → Application management
+- Compliance → Compliance checking and reporting
+- Integrations → Third-party integrations
+- GitHubIntegrationCard → GitHub integration features
+- CyberNewsCard → Security news and updates
+- HazardRow/BlastRadiusRow → Security risk analysis
+- RemediationAgentCard → Security remediation workflows
 
 **CRITICAL**: Generate flows based on the ACTUAL routes and components provided above. Use the exact names and create realistic user interactions. Do NOT provide generic advice - analyze the real codebase and generate specific flows."""
         
         print(f"🔄 Sending user flow generation prompt to Ollama (model: {OLLAMA_MODEL})")
         print(f"ℹ️ Prompt length: {len(user_flow_prompt)} characters")
         
-        # Call Ollama to generate user flows
+        # Save the prompt for debugging
+        prompt_file = f"{LOG_DIR}/user_flow_prompt_{self.run_timestamp}.txt"
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(prompt_file, 'w', encoding='utf-8') as f:
+            f.write(user_flow_prompt)
+        print(f"📝 User flow prompt saved: {prompt_file}")
+        
+        # Call Ollama API
         request_data = {
             'model': OLLAMA_MODEL,
             'prompt': user_flow_prompt,
@@ -1854,7 +1850,9 @@ def main():
         sys.exit(1)
     
     repo_url = sys.argv[1]
-    generator = IntegratedTestGenerator()
+    # Create a single timestamp for this run
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    generator = IntegratedTestGenerator(run_timestamp=run_timestamp)
     
     result = generator.generate_tests(repo_url)
     
