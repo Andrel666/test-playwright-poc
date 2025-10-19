@@ -513,9 +513,12 @@ test.describe('{flow_name}', () => {{
                         file_path = os.path.join(root, filename)
                         file_size = os.path.getsize(file_path)
                         
-                        # Skip very large files
-                        if file_size > MAX_FILE_SIZE:
-                            print(f"⚠️ Skipped {filename} - too large ({file_size} bytes > {MAX_FILE_SIZE})")
+                        # Skip very large files (allow larger files for router files)
+                        is_router_file = any(keyword in filename.lower() for keyword in ['appshell', 'router', 'routes', 'app'])
+                        max_size = MAX_FILE_SIZE * 3 if is_router_file else MAX_FILE_SIZE
+                        
+                        if file_size > max_size:
+                            print(f"⚠️ Skipped {filename} - too large ({file_size} bytes > {max_size})")
                             continue
                         
                         try:
@@ -626,23 +629,135 @@ test.describe('{flow_name}', () => {{
         return 'Other'
     
     def _extract_routes(self, content: str) -> List[str]:
-        """Extract route patterns from content"""
+        """Extract route patterns from content, focusing on React Router configurations"""
         routes = []
         
-        # Common route patterns
-        patterns = [
-            r"path=['\"]([^'\"]+)['\"]",
-            r"to=['\"]([^'\"]+)['\"]",
-            r"href=['\"]([^'\"]+)['\"]",
-            r"Route.*path=['\"]([^'\"]+)['\"]",
-            r"navigate\(['\"]([^'\"]+)['\"]\)"
+        # React Router specific patterns - prioritize these
+        react_router_patterns = [
+            # <Route path="/dashboard" element={<Dashboard />} />
+            r'<Route\s+path=["\']([^"\']+)["\']',
+            # <Route path="/dashboard" element={<Dashboard />} />
+            r'path=["\']([^"\']+)["\']\s+element=',
+            # Navigate to="/dashboard"
+            r'<Navigate\s+to=["\']([^"\']+)["\']',
+            # navigate("/dashboard")
+            r'navigate\(["\']([^"\']+)["\']\)',
+            # href="/dashboard"
+            r'href=["\']([^"\']+)["\']',
+            # to="/dashboard"
+            r'to=["\']([^"\']+)["\']'
         ]
         
-        for pattern in patterns:
-            matches = re.findall(pattern, content)
+        # Extract routes using React Router patterns first
+        for pattern in react_router_patterns:
+            matches = re.findall(pattern, content, re.IGNORECASE)
             routes.extend(matches)
         
-        return list(set(routes))
+        # Filter out invalid routes and clean up
+        valid_routes = []
+        for route in routes:
+            # Skip routes that are clearly not valid paths
+            if (route.startswith('/') and 
+                not route.startswith('//') and 
+                not route.startswith('/api/') and
+                not route.startswith('http') and
+                not route.startswith('mailto:') and
+                not route.startswith('tel:') and
+                len(route) > 1 and
+                not route.endswith('.css') and
+                not route.endswith('.js') and
+                not route.endswith('.png') and
+                not route.endswith('.jpg') and
+                not route.endswith('.ico')):
+                valid_routes.append(route)
+        
+        return list(set(valid_routes))
+    
+    def _extract_react_router_routes(self) -> Dict[str, str]:
+        """Extract routes specifically from React Router configuration files"""
+        router_routes = {}
+        
+        # Look for files that likely contain React Router configuration
+        router_files = []
+        for file_path in self.files:
+            filename = os.path.basename(file_path).lower()
+            # Look for common router/app configuration files
+            if any(keyword in filename for keyword in ['app', 'router', 'routes', 'main', 'index', 'appshell']):
+                router_files.append(file_path)
+        
+        # Also look for files that might contain Routes configuration (even if large)
+        for file_path in self.files:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                # Check if file contains React Router Routes
+                if '<Routes>' in content and '<Route' in content:
+                    if file_path not in router_files:
+                        router_files.append(file_path)
+                        print(f"🔍 Found Routes configuration in: {os.path.basename(file_path)}")
+            except Exception as e:
+                continue
+        
+        # Special handling for AppShell.tsx - it's likely to contain the main routes
+        appshell_files = [f for f in self.files if 'appshell' in os.path.basename(f).lower()]
+        for appshell_file in appshell_files:
+            if appshell_file not in router_files:
+                router_files.append(appshell_file)
+                print(f"🔍 Added AppShell file for route analysis: {os.path.basename(appshell_file)}")
+        
+        print(f"🔍 Found {len(router_files)} potential router files to analyze")
+        
+        for file_path in router_files:
+            try:
+                # Special handling for large files like AppShell.tsx
+                file_size = os.path.getsize(file_path)
+                if file_size > 10000:
+                    print(f"📁 Reading large router file: {os.path.basename(file_path)} ({file_size} bytes)")
+                
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # Look for <Routes> and <Route> patterns with better regex
+                # Pattern 1: <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+                routes_pattern1 = r'<Route\s+path=["\']([^"\']+)["\']\s+element=\{[^}]*?<(\w+)\s*/>'
+                matches1 = re.findall(routes_pattern1, content, re.DOTALL | re.IGNORECASE)
+                
+                for route_path, component_name in matches1:
+                    if route_path.startswith('/') and len(route_path) > 1:
+                        router_routes[route_path] = component_name
+                        print(f"📋 Found route: {route_path} -> {component_name}")
+                
+                # Pattern 2: <Route path="/applications" element={<Navigate to="/repositories" replace />} />
+                navigate_pattern = r'<Route\s+path=["\']([^"\']+)["\']\s+element=\{[^}]*?<Navigate[^>]*to=["\']([^"\']+)["\']'
+                navigate_matches = re.findall(navigate_pattern, content, re.DOTALL | re.IGNORECASE)
+                
+                for route_path, redirect_to in navigate_matches:
+                    if route_path.startswith('/') and len(route_path) > 1 and route_path not in router_routes:
+                        router_routes[route_path] = f"Navigate to {redirect_to}"
+                        print(f"📋 Found redirect route: {route_path} -> {redirect_to}")
+                
+                # Pattern 3: <Route path="*" element={<NotFound />} />
+                catchall_pattern = r'<Route\s+path=["\']\*["\']\s+element=\{[^}]*?<(\w+)\s*/>'
+                catchall_matches = re.findall(catchall_pattern, content, re.DOTALL | re.IGNORECASE)
+                
+                for component_name in catchall_matches:
+                    router_routes["*"] = component_name
+                    print(f"📋 Found catch-all route: * -> {component_name}")
+                
+                # Pattern 4: Simple route pattern (fallback)
+                simple_routes_pattern = r'<Route\s+path=["\']([^"\']+)["\']'
+                simple_matches = re.findall(simple_routes_pattern, content, re.IGNORECASE)
+                
+                for route_path in simple_matches:
+                    if route_path.startswith('/') and len(route_path) > 1 and route_path not in router_routes:
+                        router_routes[route_path] = "Unknown"
+                        print(f"📋 Found route: {route_path} -> Unknown component")
+                        
+            except Exception as e:
+                print(f"⚠️ Error reading router file {file_path}: {e}")
+        
+        print(f"✅ Extracted {len(router_routes)} routes from React Router configuration")
+        return router_routes
     
     def _export_graphviz(self, graph: nx.DiGraph, file_roles: Dict[str, str]):
         """Export dependency graph to Graphviz format"""
@@ -1132,8 +1247,12 @@ Generate comprehensive, production-ready test cases now:
         """Perform comprehensive application analysis to understand full functionality"""
         print("🔍 Performing comprehensive application analysis")
         
+        # First, extract React Router routes (highest priority)
+        router_routes = self._extract_react_router_routes()
+        
         analysis = {
             "routes": [],
+            "router_routes": router_routes,  # Keep router routes separate for user flow generation
             "components": [],
             "pages": [],
             "forms": [],
@@ -1149,10 +1268,10 @@ Generate comprehensive, production-ready test cases now:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                     
-                # Extract routes
-                route_matches = re.findall(r'["\']([^"\']*\/[^"\']*)["\']', content)
-                for route in route_matches:
-                    if route.startswith('/') and route not in analysis["routes"]:
+                # Extract routes using enhanced method
+                routes = self._extract_routes(content)
+                for route in routes:
+                    if route not in analysis["routes"]:
                         analysis["routes"].append(route)
                 
                 # Extract components and pages
@@ -1198,8 +1317,15 @@ Generate comprehensive, production-ready test cases now:
         """Generate comprehensive User Flow Description Report using LLM"""
         print("🔄 Generating User Flow Description Report")
         
-        # Extract context for the prompt
-        routes_list = "\n".join([f"- {route}" for route in analysis.get('routes', [])[:20]])
+        # Extract context for the prompt - prioritize React Router routes
+        router_routes = analysis.get('router_routes', {})
+        if router_routes:
+            routes_list = "\n".join([f"- {route} (Component: {component})" for route, component in router_routes.items()])
+            routes_list += "\n\nAdditional routes found:\n"
+            routes_list += "\n".join([f"- {route}" for route in analysis.get('routes', []) if route not in router_routes][:10])
+        else:
+            routes_list = "\n".join([f"- {route}" for route in analysis.get('routes', [])[:20]])
+        
         components_list = "\n".join([f"- {comp}" for comp in analysis.get('pages', [])[:20]])
         api_endpoints_list = "\n".join([f"- {endpoint}" for endpoint in analysis.get('api_endpoints', [])[:15]])
         
@@ -1209,21 +1335,11 @@ Generate comprehensive, production-ready test cases now:
         ui_elements_analysis = self._analyze_ui_elements()
         
         # Build the enhanced user flow generation prompt
-        user_flow_prompt = f"""You are a senior QA automation architect analyzing a frontend codebase for test generation purposes. Your task is to generate **SPECIFIC User Flows** based on the provided routes, components, and APIs.
+        user_flow_prompt = f"""You are a senior QA automation architect analyzing a frontend codebase for test generation purposes. Your task is to generate **COMPREHENSIVE User Flows** based on the React Router configuration and component structure.
 
-IMPORTANT: This is for automated test generation. You MUST analyze the provided codebase context and generate flows based on the actual components and routes listed below.
+CRITICAL: You MUST generate flows for EVERY route found in the React Router configuration. Do NOT limit yourself to just 3 flows. Generate flows for ALL routes provided below.
 
-CRITICAL REQUIREMENTS:
-- **ANALYZE THE PROVIDED CODEBASE** - Use the exact routes, components, and APIs provided below
-- **Generate specific flows** based on the real application components
-- **Use exact names** from the routes, components, and API endpoints listed
-- **Generate 8-15 distinct flows** covering different application features
-- **Exclude authentication flows** (login, register, password reset)
-- **Focus on business logic** and application-specific functionality
-
-Here is the analyzed codebase context:
-
-ROUTES FOUND:
+REACT ROUTER ROUTES FOUND (GENERATE FLOWS FOR ALL OF THESE):
 {routes_list}
 
 COMPONENTS DETECTED:
@@ -1241,23 +1357,21 @@ FORM COMPONENTS ANALYSIS:
 UI ELEMENTS ANALYSIS:
 {ui_elements_analysis}
 
-IMPORTANT INSTRUCTIONS:
-1. **DETAILED ANALYSIS REQUIRED**: Examine each component's actual functionality, not just names
-2. **SPECIFIC UI ELEMENTS**: Include exact button text, form field names, modal titles, etc.
-3. **INTERACTION SEQUENCES**: Describe precise user actions and system responses
-4. **STATE MANAGEMENT**: Include loading states, validation states, error states
-5. **EDGE CASES**: Cover error scenarios, empty states, validation failures
-6. **EXCLUDE BASIC AUTH**: Do NOT generate login, registration, or password reset flows
-7. **FOCUS ON BUSINESS LOGIC**: Prioritize application-specific features and workflows
-8. **COMPREHENSIVE COVERAGE**: Generate 8-15 distinct user flows based on actual functionality
+CRITICAL REQUIREMENTS:
+1. **GENERATE FLOWS FOR ALL ROUTES**: Create a user flow for EVERY route listed above
+2. **NO LIMIT ON NUMBER OF FLOWS**: Generate as many flows as there are routes
+3. **USE EXACT ROUTE NAMES**: Use the exact route paths provided above
+4. **EXCLUDE AUTHENTICATION**: Do NOT generate login, registration, or password reset flows
+5. **FOCUS ON BUSINESS LOGIC**: Prioritize application-specific features and workflows
+6. **DETAILED ANALYSIS**: Include specific UI elements, interactions, and edge cases
 
-OUTPUT FORMAT - Generate detailed flows using this structure:
+OUTPUT FORMAT - Generate ONE flow for EACH route:
 
 ---
-## Flow: [Flow Name Based on Actual Components]
+## Flow: [Descriptive Name for Route]
 
-- **Route**: [Actual route from the routes list above]
-- **Components**: [Actual component names from the components list above]
+- **Route**: [Exact route from the list above]
+- **Components**: [Components involved]
 - **UI Elements**:
   - [Specific UI elements found in the actual components]
   - [Button text, form fields, modal titles from actual code]
@@ -1278,17 +1392,20 @@ OUTPUT FORMAT - Generate detailed flows using this structure:
 - Generate 8-15 distinct flows covering different application features
 - Exclude authentication flows (login, registration, password reset)
 
-**ANALYZE THE ACTUAL COMPONENTS**:
-Look at the component names and infer their functionality:
-- SecurityIntelligenceDashboard → Security analysis and intelligence features
-- AgentsDashboard → AI agent management and monitoring
-- ApplicationCard/ApplicationDetailsView → Application management
-- Compliance → Compliance checking and reporting
-- Integrations → Third-party integrations
-- GitHubIntegrationCard → GitHub integration features
-- CyberNewsCard → Security news and updates
-- HazardRow/BlastRadiusRow → Security risk analysis
-- RemediationAgentCard → Security remediation workflows
+**CRITICAL INSTRUCTIONS**:
+1. **GENERATE FLOWS FOR EVERY ROUTE**: Create a detailed user flow for each route listed above
+2. **NO GENERIC EXAMPLES**: Do NOT provide generic advice or examples - analyze the actual codebase
+3. **USE EXACT ROUTE NAMES**: Use the exact route paths provided in the routes list
+4. **ANALYZE COMPONENTS**: Look at the component names and infer their actual functionality
+5. **DETAILED STEPS**: Include specific user actions, UI interactions, and expected outcomes
+6. **COMPREHENSIVE COVERAGE**: Generate as many flows as there are routes - do not limit to 3 flows
+
+**OUTPUT REQUIREMENTS**:
+- Generate ONE flow for EACH route in the routes list
+- Include detailed steps for each flow
+- Use the exact component names from the components list
+- Include specific UI elements and interactions
+- Cover success scenarios, error handling, and edge cases
 
 **CRITICAL**: Generate flows based on the ACTUAL routes and components provided above. Use the exact names and create realistic user interactions. Do NOT provide generic advice - analyze the real codebase and generate specific flows."""
         
@@ -1308,7 +1425,7 @@ Look at the component names and infer their functionality:
             'prompt': user_flow_prompt,
             'stream': False,
             'options': {
-                'num_predict': 2000,
+                'num_predict': 8000,
                 'temperature': 0.7,
                 'top_p': 0.9,
                 'top_k': 40
